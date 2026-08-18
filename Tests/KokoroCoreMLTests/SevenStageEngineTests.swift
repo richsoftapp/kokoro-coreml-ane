@@ -1,3 +1,4 @@
+import CoreML
 import Foundation
 import Testing
 
@@ -58,6 +59,44 @@ struct SevenStageEngineTests {
             .appendingPathComponent("sevenstage.wav")
         try writeWAV(result.samples, to: out)
         print("wav: \(out.path)")
+    }
+
+    /// 스테이지 입력 dtype 계약을 고정한다.
+    ///
+    /// 이 검사가 필요한 이유: macOS CoreML은 dtype 불일치를 관대하게 넘겨 주지만 iOS 기기는
+    /// `Cannot retrieve vector from IRValue format …`으로 거부한다. 즉 **합성이 macOS에서
+    /// 통과해도 기기에서 죽을 수 있다** — 실제로 Noise(fp32 출력) → Vocoder(fp16 입력) 경계에서
+    /// 그렇게 당했다. 동작 테스트로는 못 잡으므로 계약을 직접 본다.
+    @Test("스테이지 입력 dtype 계약", .enabled(if: modelDir != nil))
+    func stageInputDataTypes() throws {
+        let expected: [String: [String: MLMultiArrayDataType]] = [
+            "KokoroAlbert": ["input_ids": .int32, "attention_mask": .int32],
+            "KokoroPostAlbert": [
+                "bert_dur": .float16, "input_ids": .int32, "style_s": .float16,
+                "speed": .float16, "attention_mask": .int32,
+            ],
+            "KokoroAlignment": ["pred_dur": .int32, "d": .float16, "t_en": .float16],
+            "KokoroProsody": ["en": .float16, "style_s": .float16],
+            "KokoroNoise": ["F0_curve": .float32, "style_timbre": .float32],
+            "KokoroVocoder": [
+                "asr": .float16, "F0_curve": .float16, "N_pred": .float16,
+                "x_source_0": .float16, "x_source_1": .float16, "style_timbre": .float16,
+            ],
+            "KokoroTail": ["x_pre": .float32],
+        ]
+
+        for (name, inputs) in expected.sorted(by: { $0.key < $1.key }) {
+            let url = Self.modelDir!.appendingPathComponent("\(name).mlmodelc")
+            let model = try MLModel(contentsOf: url)
+            for (input, type) in inputs.sorted(by: { $0.key < $1.key }) {
+                let desc = model.modelDescription.inputDescriptionsByName[input]
+                #expect(desc != nil, "\(name): 입력 \(input) 없음")
+                #expect(
+                    desc?.multiArrayConstraint?.dataType == type,
+                    "\(name).\(input): \(String(describing: desc?.multiArrayConstraint?.dataType)) ≠ \(type)"
+                )
+            }
+        }
     }
 
     private func writeWAV(_ samples: [Float], to url: URL) throws {

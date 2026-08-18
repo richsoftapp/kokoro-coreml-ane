@@ -233,34 +233,33 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
         let f0Arr = try MLArrays.require(o4, "F0")
         let nArr = try MLArrays.require(o4, "N")
 
-        // 5. Noise — 하모닉 소스 (fp32)
-        let f0F32 = try MLArrays.float32(
-            MLArrayHelpers.extractFloats(from: f0Arr), shape: [1, f0Arr.count]
-        )
+        // 5. Noise — 하모닉 소스. 7스테이지 중 유일하게 fp32 입출력이라 경계에서 변환한다.
         let o5 = try noise.prediction(from: MLDictionaryFeatureProvider(dictionary: [
-            "F0_curve": f0F32, "style_timbre": timbreF32,
+            "F0_curve": try MLArrays.cast(f0Arr, to: .float32),
+            "style_timbre": timbreF32,
         ]))
         let xs0 = try MLArrays.require(o5, "x_source_0")
         let xs1 = try MLArrays.require(o5, "x_source_1")
 
-        // 6. Vocoder — ANE 그래프를 유지하려 audio anchor도 내지만 버리고 x_pre만 쓴다
+        // 6. Vocoder — ANE 그래프를 유지하려 audio anchor도 내지만 버리고 x_pre만 쓴다.
+        //
+        // x_source_*는 Noise가 **Float32**로 내는데 Vocoder 입력은 **Float16**이다. CoreML은 이
+        // 불일치를 자동 변환해 주지 않고 `Cannot retrieve vector from IRValue format …`으로 죽는다.
+        // (Python 경로는 numpy `.astype(np.float16)`이 가려 줬다.) 스테이지 경계마다 선언된 타입으로
+        // 맞춰 넘긴다.
         let o6 = try vocoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
             "asr": asrArr,
             "F0_curve": f0Arr,
             "N_pred": nArr,
-            "x_source_0": xs0,
-            "x_source_1": xs1,
+            "x_source_0": try MLArrays.cast(xs0, to: .float16),
+            "x_source_1": try MLArrays.cast(xs1, to: .float16),
             "style_timbre": timbreF16,
         ]))
         let xPre = try MLArrays.require(o6, "x_pre")
 
         // 7. Tail — fp32 conv_post + iSTFT
-        let xPreF32 = try MLArrays.float32(
-            MLArrayHelpers.extractFloats(from: xPre),
-            shape: xPre.shape.map(\.intValue)
-        )
         let o7 = try tail.prediction(from: MLDictionaryFeatureProvider(dictionary: [
-            "x_pre": xPreF32,
+            "x_pre": try MLArrays.cast(xPre, to: .float32),
         ]))
         let audio = try MLArrays.require(o7, "audio")
 
@@ -295,6 +294,21 @@ enum MLArrays {
         let ptr = a.dataPointer.assumingMemoryBound(to: Float16.self)
         for (i, v) in values.enumerated() { ptr[i] = Float16(v) }
         return a
+    }
+
+    /// 스테이지 출력 배열을 다음 스테이지가 선언한 dtype으로 맞춘다(이미 같으면 그대로 통과).
+    ///
+    /// CoreML은 입력 dtype 불일치를 자동 변환하지 않고 `Cannot retrieve vector from IRValue
+    /// format …`류의 오류로 실패한다. 모델이 fp16/fp32를 섞어 쓰므로(Noise만 fp32) 경계에서 명시 변환이 필요하다.
+    static func cast(_ array: MLMultiArray, to type: MLMultiArrayDataType) throws -> MLMultiArray {
+        guard array.dataType != type else { return array }
+        let shape = array.shape.map(\.intValue)
+        let values = MLArrayHelpers.extractFloats(from: array)
+        switch type {
+        case .float16: return try float16(values, shape: shape)
+        case .float32: return try float32(values, shape: shape)
+        default: throw KokoroError.inferenceFailed("Unsupported cast target: \(type)")
+        }
     }
 
     static func require(_ provider: MLFeatureProvider, _ name: String) throws -> MLMultiArray {
