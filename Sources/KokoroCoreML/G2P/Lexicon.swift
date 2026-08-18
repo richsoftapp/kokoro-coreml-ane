@@ -19,6 +19,8 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         "$": ("dollar", "cent"),
         "£": ("pound", "pence"),
         "€": ("euro", "cent"),
+        "¥": ("yen", "sen"),
+        "₩": ("won", "jeon"),
     ]
 
     private let british: Bool

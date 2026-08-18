@@ -360,6 +360,48 @@ final class EnglishG2P {
     /// `tokenize`는 "re-use"를 세 토큰으로 쪼개는데, 그러면 "re"가 홀로 남아 음이름 ɹˌA("레이")로
     /// 읽힌다. 붙인 "reuse"는 사전에 ɹijˈuz로 있으므로 그걸 쓴다. 사전에 없으면(well-known,
     /// twenty-five) 손대지 않고 조각별 처리에 맡긴다 — 그쪽은 하이픈의 쉼만 제거되면 정확하다.
+    /// 숫자 뒤에 올 때만 풀어 읽는 단위. (단수형, 복수형)
+    ///
+    /// 한 글자 단위(`m` `s` `g` `h` `in`)는 **일부러 뺐다** — "born in 1990 in Seoul"의 `in`이
+    /// "1990 inches"가 되는 식의 오탐이 실제로 생긴다. 여러 글자 약어만 다룬다.
+    static let unitWords: [String: (String, String)] = [
+        "kg": ("kilogram", "kilograms"), "mg": ("milligram", "milligrams"),
+        "km": ("kilometer", "kilometers"), "cm": ("centimeter", "centimeters"),
+        "mm": ("millimeter", "millimeters"), "ml": ("milliliter", "milliliters"),
+        "kb": ("kilobyte", "kilobytes"), "mb": ("megabyte", "megabytes"),
+        "gb": ("gigabyte", "gigabytes"), "tb": ("terabyte", "terabytes"),
+        "ft": ("foot", "feet"), "lb": ("pound", "pounds"), "lbs": ("pound", "pounds"),
+        "oz": ("ounce", "ounces"), "mi": ("mile", "miles"), "yd": ("yard", "yards"),
+        "hr": ("hour", "hours"), "hrs": ("hour", "hours"),
+        "min": ("minute", "minutes"), "mins": ("minute", "minutes"),
+        "sec": ("second", "seconds"), "secs": ("second", "seconds"),
+        "ms": ("millisecond", "milliseconds"), "mph": ("mile per hour", "miles per hour"),
+        "kw": ("kilowatt", "kilowatts"), "mhz": ("megahertz", "megahertz"),
+        "ghz": ("gigahertz", "gigahertz"),
+    ]
+
+    /// 숫자를 삼켜 버리던 기호들. 값 없이 alias 로 읽는다.
+    static let symbolWords: [String: String] = [
+        "=": "equals", "°": "degrees", "§": "section", "×": "times",
+        // ¥ ₩ 는 여기 두지 않는다 — 통화 경로(Lexicon.currencies)가 "300 yen"처럼
+        // 숫자 뒤로 어순을 바로잡아 주기 때문이다. 여기 두면 "yen 300"이 된다.
+    ]
+
+    /// 여러 낱말로 읽어야 하는 기호. alias 는 한 낱말만 받으므로 음소를 직접 이어 붙인다.
+    static let symbolPhrases: [String: [String]] = [
+        "±": ["plus", "or", "minus"],
+        "÷": ["divided", "by"],
+        "≈": ["approximately"],
+        "≤": ["less", "than", "or", "equal", "to"],
+        "≥": ["greater", "than", "or", "equal", "to"],
+    ]
+
+    /// 철자로 읽어야 자연스러운 두문자·확장자.
+    static let spelledOut: Set<String> = [
+        "phd", "msc", "bsc", "mba", "pdf", "png", "jpg", "jpeg", "gif", "svg",
+        "csv", "html", "css", "url", "usb", "gps", "pdfs",
+    ]
+
     /// 문서에 흔한 특수 표기를 읽을 수 있게 손본다. **토큰 텍스트는 바꾸지 않고** alias/공백만
     /// 조정하므로, 화면 단어와 타이밍 토큰의 글자 흐름이 그대로 유지된다(하이라이트 정렬 보존).
     ///
@@ -377,6 +419,81 @@ final class EnglishG2P {
             guard token.phonemes == nil, token.meta.alias == nil else { continue }
             let text = token.text
             let lower = text.lowercased()
+
+            // 여러 낱말 기호(± ÷ ≈ ≤ ≥)
+            if let phrase = Self.symbolPhrases[text] {
+                let parts = phrase.compactMap { lexicon.phonemesForWord($0) }
+                if parts.count == phrase.count {
+                    token.phonemes = parts.joined(separator: " ")
+                    token.whitespace = " "
+                    if i > 0 { tokens[i - 1].whitespace = " " }
+                    continue
+                }
+            }
+
+            // 숫자를 삼키던 기호: = ° § ×
+            if let symbol = Self.symbolWords[text] {
+                token.meta.alias = symbol
+                token.whitespace = " "
+                if i > 0 { tokens[i - 1].whitespace = " " }
+                continue
+            }
+
+            // 철자로 읽을 두문자·확장자 (PhD → P H D, pdf → P D F)
+            if Self.spelledOut.contains(lower), let letters = lexicon.getNNP(text).phoneme {
+                token.phonemes = letters
+                continue
+            }
+
+            // @ 는 앞말과 붙어 있어도 "at" 으로 읽는다.
+            if text == "@" {
+                token.meta.alias = "at"
+                token.whitespace = " "
+                if i > 0 { tokens[i - 1].whitespace = " " }
+                continue
+            }
+
+            // 단위: 바로 앞이 숫자일 때만 풀어 읽는다.
+            if let (singular, plural) = Self.unitWords[lower], i > 0, isDigits(tokens[i - 1]) {
+                token.meta.alias = tokens[i - 1].text == "1" ? singular : plural
+                token.whitespace = token.whitespace.isEmpty ? " " : token.whitespace
+                tokens[i - 1].whitespace = " "
+                continue
+            }
+
+            // 단위 사이의 슬래시는 "per" (km/h → kilometers per hour)
+            if text == "/", i > 0, i + 1 < tokens.count,
+                Self.unitWords[tokens[i - 1].text.lowercased()] != nil
+                    || tokens[i - 1].meta.alias?.hasSuffix("s") == true,
+                Self.unitWords[tokens[i + 1].text.lowercased()] != nil
+                    || tokens[i + 1].text.lowercased() == "h"
+            {
+                token.meta.alias = "per"
+                token.phonemes = nil
+                token.whitespace = " "
+                tokens[i - 1].whitespace = " "
+                if tokens[i + 1].text.lowercased() == "h" { tokens[i + 1].meta.alias = "hour" }
+                continue
+            }
+
+            // URL 스킴은 읽지 않는다. "https://example.com"을 그대로 읽으면
+            // "t: example dot com"처럼 깨진다(https가 "t"로 뭉개짐). 읽는 앱에서는
+            // 스킴을 빼고 호스트만 읽는 편이 자연스럽다.
+            if ["http", "https", "ftp", "ftps", "mailto"].contains(lower),
+                i + 1 < tokens.count, tokens[i + 1].text == ":"
+            {
+                token.phonemes = ""
+                token.whitespace = ""
+                var next = i + 1
+                // ":" 와 뒤따르는 "/" 들을 함께 지운다.
+                while next < tokens.count, [":", "/"].contains(tokens[next].text) {
+                    tokens[next].phonemes = ""
+                    tokens[next].meta.alias = nil
+                    tokens[next].whitespace = ""
+                    next += 1
+                }
+                continue
+            }
 
             // vs / vs. → versus
             if lower == "vs" {
@@ -501,7 +618,9 @@ final class EnglishG2P {
                 let piece = MToken(copying: token)
                 piece.text = part
                 piece.whitespace = " "
-                piece.phonemes = part.lowercased() == "www" ? lexicon.getNNP(part).phoneme : nil
+                let spellIt = part.lowercased() == "www"
+                    || (index == parts.count - 1 && Self.fileExtensions.contains(part.lowercased()))
+                piece.phonemes = spellIt ? lexicon.getNNP(part).phoneme : nil
                 piece.meta.is_head = (index == 0)
                 out.append(piece)
             }
@@ -509,6 +628,13 @@ final class EnglishG2P {
         }
         return out
     }
+
+    /// 도메인처럼 취급할 파일 확장자. 철자로 읽어야 자연스러운 것들만 넣는다
+    /// (`file.txt`는 "file text"로도 무난해 뺐다).
+    static let fileExtensions: Set<String> = [
+        "pdf", "png", "jpg", "jpeg", "gif", "svg", "csv", "html", "htm",
+        "zip", "docx", "xlsx", "pptx", "mp3", "mp4", "json", "xml",
+    ]
 
     /// 도메인처럼 보이면 점으로 나눈 조각을, 아니면 nil.
     static func domainParts(_ text: String) -> [String]? {
@@ -519,7 +645,8 @@ final class EnglishG2P {
             parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isLetter || $0.isNumber } }),
             parts.contains(where: { $0.contains(where: \.isLetter) }),
             let tld = parts.last?.lowercased(),
-            Lexicon.knownTLDs.contains(tld) || parts[0].lowercased() == "www"
+            Lexicon.knownTLDs.contains(tld) || fileExtensions.contains(tld)
+                || parts[0].lowercased() == "www"
         else { return nil }
         return parts
     }

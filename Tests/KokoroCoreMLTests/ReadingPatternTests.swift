@@ -63,6 +63,45 @@ struct ReadingPatternTests {
         #expect(p("21st").contains("fˈɜɹst"))
     }
 
+    @Test("숫자를 삼키던 기호")
+    func symbols() {
+        #expect(p("2+2=4").contains("ˈikwᵊlz"))
+        #expect(p("90°").contains("dəɡɹˈiz"))
+        #expect(p("25°C").contains("twˈɛnti"))
+        #expect(p("±5").contains("mˈInəs"))
+        #expect(p("§ 3").contains("sˈɛkʃən"))
+    }
+
+    @Test("통화는 숫자 뒤로")
+    func currencies() {
+        #expect(p("¥300").hasPrefix("θɹˈi"))
+        #expect(p("₩5000").hasPrefix("fˈIv"))
+        #expect(p("$100").hasPrefix("wˈʌn"))
+    }
+
+    @Test("단위를 풀어 읽는다")
+    func units() {
+        #expect(p("5kg").contains("kˈɪləɡɹˌæmz"))
+        #expect(p("25 mg").contains("mˈɪləɡɹˌæmz"))
+        #expect(p("6 ft").contains("fˈit"))
+        #expect(p("10 km/h").contains("pɜɹ"))
+        #expect(!p("born in 1990 in Seoul").contains("ˈɪnʧᵻz"))
+    }
+
+    @Test("두문자·확장자는 철자로")
+    func spelled() {
+        #expect(p("PhD").contains("ˌAʧ"))
+        #expect(p("report.pdf").contains("dˈɑt"))
+    }
+
+    @Test("URL 스킴은 읽지 않는다")
+    func urlSchemes() {
+        let https = p("https://example.com")
+        #expect(https.hasPrefix("ɪɡzˈæmpəl"), "https:// → \(https)")
+        #expect(!https.contains(":"))
+        #expect(p("ftp://files.net").hasPrefix("fˈIlz"))
+    }
+
     @Test("vs. 는 versus")
     func versus() {
         #expect(p("vs.").contains("vˈɜɹsəs"))
