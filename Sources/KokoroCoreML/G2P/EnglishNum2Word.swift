@@ -132,20 +132,12 @@ struct EnglishNum2Word {
             }
         }
 
-        for (value, word) in midNumWords.sorted(by: { $0.0 > $1.0 }) {
-            if number >= value {
-                let quotient = number / value
-                let remainder = number % value
-                let quotientWord = toCardinal(quotient)
-                if remainder == 0 {
-                    return "\(quotientWord) \(word)"
-                } else {
-                    return "\(quotientWord) \(word), \(toCardinal(remainder))"
-                }
-            }
-        }
-
-        for (value, word) in cards.sorted(by: { $0.key > $1.key }) {
+        // 큰 단위(million 이상)를 **먼저** 본다. midNumWords에는 1000(thousand)이 들어 있어서
+        // 이 순서가 뒤집히면 1,000,000이 1000에 먼저 걸려 quotient가 1000이 되고,
+        // toCardinal(1000)="one thousand"가 붙어 "one thousand thousand"가 된다(백만이 사라짐).
+        let scales = cards.map { ($0.key, $0.value) }.sorted { $0.0 > $1.0 }
+            + midNumWords.sorted { $0.0 > $1.0 }
+        for (value, word) in scales {
             if number >= value {
                 let quotient = number / value
                 let remainder = number % value

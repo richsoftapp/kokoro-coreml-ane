@@ -360,6 +360,170 @@ final class EnglishG2P {
     /// `tokenize`는 "re-use"를 세 토큰으로 쪼개는데, 그러면 "re"가 홀로 남아 음이름 ɹˌA("레이")로
     /// 읽힌다. 붙인 "reuse"는 사전에 ɹijˈuz로 있으므로 그걸 쓴다. 사전에 없으면(well-known,
     /// twenty-five) 손대지 않고 조각별 처리에 맡긴다 — 그쪽은 하이픈의 쉼만 제거되면 정확하다.
+    /// 문서에 흔한 특수 표기를 읽을 수 있게 손본다. **토큰 텍스트는 바꾸지 않고** alias/공백만
+    /// 조정하므로, 화면 단어와 타이밍 토큰의 글자 흐름이 그대로 유지된다(하이라이트 정렬 보존).
+    ///
+    ///  · 숫자 범위 `5-10` → "five **to** ten" (예전엔 "fiveten"으로 붙었다)
+    ///  · 슬래시 `and/or`, `km/h` → 양쪽을 띄운다 (예전엔 "andor"로 붙었다)
+    ///  · `p. 12` → "page 12",  `pp. 12-15` → "pages 12 to 15"
+    ///  · `vs.` → "versus" (예전엔 "viz")
+    func readSpecialPatterns(_ rawTokens: [MToken]) -> [MToken] {
+        let tokens = splitNumberUnitTokens(rawTokens)
+        guard !tokens.isEmpty else { return tokens }
+        func isDigits(_ t: MToken) -> Bool {
+            !t.text.isEmpty && t.text.allSatisfy(\.isNumber)
+        }
+        for (i, token) in tokens.enumerated() {
+            guard token.phonemes == nil, token.meta.alias == nil else { continue }
+            let text = token.text
+            let lower = text.lowercased()
+
+            // vs / vs. → versus
+            if lower == "vs" {
+                token.meta.alias = "versus"
+                continue
+            }
+
+            // p. / pp. + 숫자 → page(s). 뒤에 숫자가 와야만 적용한다("p"로 끝나는 문장 보호).
+            // 토크나이저가 "pp."를 점까지 한 토큰으로 주기도 하고 "pp" + "."로 쪼개기도 한다.
+            let bare = lower.hasSuffix(".") ? String(lower.dropLast()) : lower
+            if bare == "p" || bare == "pp" {
+                let dotIsSeparate = lower == bare
+                let numberIndex = dotIsSeparate ? i + 2 : i + 1
+                if (!dotIsSeparate || (i + 1 < tokens.count && tokens[i + 1].text == ".")),
+                    numberIndex < tokens.count, isDigits(tokens[numberIndex])
+                {
+                    token.meta.alias = bare == "p" ? "page" : "pages"
+                    if dotIsSeparate {
+                        let dot = tokens[i + 1]
+                        dot.meta.alias = ""
+                        dot.phonemes = ""
+                        dot.whitespace = " "
+                    } else {
+                        token.whitespace = " "
+                    }
+                    continue
+                }
+            }
+
+            // 슬래시: 음소 없이 양쪽만 띄운다. "and slash or"보다 "and or"가 자연스럽다.
+            if text == "/" {
+                token.phonemes = ""
+                token.whitespace = " "
+                if i > 0 { tokens[i - 1].whitespace = " " }
+                continue
+            }
+
+            // 숫자 범위: 숫자-숫자가 공백 없이 붙어 있을 때만. 앞뒤로 대시가 더 있으면
+            // 날짜(2026-08-18)·ISBN이므로 건드리지 않는다. 전화번호는 오탐 가능성이 있으나
+            // 책·기사에서는 쪽수·연도 범위가 압도적으로 흔하다.
+            if text == "-" || text == "\u{2013}", i > 0, i + 1 < tokens.count,
+                isDigits(tokens[i - 1]), isDigits(tokens[i + 1]),
+                tokens[i - 1].whitespace.isEmpty, token.whitespace.isEmpty,
+                !(i >= 2 && ["-", "\u{2013}"].contains(tokens[i - 2].text)),
+                !(i + 2 < tokens.count && ["-", "\u{2013}"].contains(tokens[i + 2].text)),
+                // 555-1234 같은 전화번호 모양(3자리-4자리)은 범위가 아니다.
+                !(tokens[i - 1].text.count == 3 && tokens[i + 1].text.count == 4)
+            {
+                token.meta.alias = "to"
+                token.whitespace = " "
+                tokens[i - 1].whitespace = " "
+            }
+        }
+        return tokens
+    }
+
+    /// `5kg`처럼 숫자 뒤에 단위가 붙은 토큰을 숫자와 단위로 나눈다.
+    ///
+    /// 예전엔 통째로 사전을 못 찾아 "keg"로 읽히며 **숫자 5가 통째로 사라졌다**. 서수
+    /// (`1st` `2nd` `3rd` `4th`)는 이미 정상 처리되므로 건드리지 않는다.
+    func splitNumberUnitTokens(_ tokens: [MToken]) -> [MToken] {
+        var out: [MToken] = []
+        for token in tokens {
+            guard token.phonemes == nil, token.meta.alias == nil,
+                let boundary = token.text.firstIndex(where: { !$0.isNumber }),
+                boundary != token.text.startIndex,
+                token.text[boundary...].allSatisfy(\.isLetter),
+                !["st", "nd", "rd", "th"].contains(String(token.text[boundary...]).lowercased())
+            else {
+                out.append(token)
+                continue
+            }
+            let number = MToken(copying: token)
+            number.text = String(token.text[..<boundary])
+            number.whitespace = " "
+            number.meta.is_head = true
+            out.append(number)
+
+            let unit = MToken(copying: token)
+            unit.text = String(token.text[boundary...])
+            unit.whitespace = token.whitespace
+            unit.meta.is_head = false
+            out.append(unit)
+        }
+        return out
+    }
+
+    /// 도메인/호스트 토큰을 조각과 "dot"으로 펼친다.
+    ///
+    /// `tokenize`는 "www.gutenberg.org"를 한 토큰으로 남기는데, 그러면 점이 통째로 사라져
+    /// "example.com"이 "example컴"(ɪɡzˈæmpəlkˌɑm)으로 붙고 `www`는 한 단어로 뭉개져
+    /// "유-어-어"(jˈuɔɔ)로 읽힌다.
+    ///
+    /// 조각을 각각 독립 토큰으로 만들어 **일반 G2P 경로**(사전 → 폴백)를 그대로 타게 하고,
+    /// 사이에 alias `"dot"` 토큰을 끼운다. 사전에 없는 조각(gutenberg)도 정상 발음된다 —
+    /// 사전 안에서 처리하면 폴백을 못 타 철자로 읽히는 문제가 있었다.
+    /// `www`만 예외로 철자 발음을 직접 넣는다.
+    ///
+    /// 마지막 조각이 알려진 TLD이거나 첫 조각이 `www`일 때만 펼친다 — `file.txt`·`U.S.A.`·
+    /// `3.5`는 건드리지 않는다.
+    func expandDomainTokens(_ tokens: [MToken]) -> [MToken] {
+        var out: [MToken] = []
+        for token in tokens {
+            guard token.phonemes == nil, token.meta.alias == nil,
+                let parts = Self.domainParts(token.text)
+            else {
+                out.append(token)
+                continue
+            }
+            for (index, part) in parts.enumerated() {
+                if index > 0 {
+                    let dot = MToken(copying: token)
+                    dot.text = "."
+                    // 조각 사이를 띄운다 — 안 띄우면 음소가 한 덩어리로 붙어 "더블유더블유
+                    // 더블유닷구텐베르크닷오르그"처럼 몰아쳐 읽는다.
+                    dot.whitespace = " "
+                    dot.phonemes = nil
+                    dot.meta.alias = "dot"
+                    dot.meta.is_head = false
+                    out.append(dot)
+                }
+                let piece = MToken(copying: token)
+                piece.text = part
+                piece.whitespace = " "
+                piece.phonemes = part.lowercased() == "www" ? lexicon.getNNP(part).phoneme : nil
+                piece.meta.is_head = (index == 0)
+                out.append(piece)
+            }
+            out.last?.whitespace = token.whitespace
+        }
+        return out
+    }
+
+    /// 도메인처럼 보이면 점으로 나눈 조각을, 아니면 nil.
+    static func domainParts(_ text: String) -> [String]? {
+        let stripped = text.hasSuffix(".") ? String(text.dropLast()) : text
+        guard stripped.contains("."), !stripped.hasPrefix(".") else { return nil }
+        let parts = stripped.split(separator: ".").map(String.init)
+        guard parts.count >= 2,
+            parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isLetter || $0.isNumber } }),
+            parts.contains(where: { $0.contains(where: \.isLetter) }),
+            let tld = parts.last?.lowercased(),
+            Lexicon.knownTLDs.contains(tld) || parts[0].lowercased() == "www"
+        else { return nil }
+        return parts
+    }
+
     func joinHyphenatedCompounds(_ tokens: [MToken]) -> [MToken] {
         guard tokens.count >= 3 else { return tokens }
         var out: [MToken] = []
@@ -404,7 +568,7 @@ final class EnglishG2P {
 
     // swiftlint:disable:next function_body_length
     func retokenize(_ rawTokens: [MToken]) -> [RetokenizedItem] {
-        let tokens = joinHyphenatedCompounds(rawTokens)
+        let tokens = joinHyphenatedCompounds(expandDomainTokens(readSpecialPatterns(rawTokens)))
         var words: [RetokenizedItem] = []
         var currency: String? = nil
 

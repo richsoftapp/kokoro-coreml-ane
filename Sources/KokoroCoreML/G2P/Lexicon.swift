@@ -177,6 +177,13 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     }
 
     /// Spell out acronyms and proper nouns letter-by-letter.
+    /// 알려진 최상위 도메인. 이 목록에 걸릴 때만 도메인으로 취급해 오탐을 막는다.
+    static let knownTLDs: Set<String> = [
+        "com", "org", "net", "edu", "gov", "mil", "int", "io", "co", "ai", "app", "dev",
+        "me", "info", "biz", "tv", "xyz", "kr", "jp", "uk", "us", "de", "fr", "cn", "ru",
+        "ca", "au", "in", "it", "es", "nl", "se", "no", "br", "mx",
+    ]
+
     func getNNP(_ word: String) -> (phoneme: String?, rating: Int?) {
         let pieces: [String?] = word.compactMap { ch in
             if ch.isLetter {
