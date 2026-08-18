@@ -355,6 +355,38 @@ final class EnglishG2P {
         return result
     }
 
+    /// `[낱말, "-", 낱말]`이 공백 없이 붙어 있고 **붙여 쓴 형태가 사전에 있으면** 하나로 합친다.
+    ///
+    /// `tokenize`는 "re-use"를 세 토큰으로 쪼개는데, 그러면 "re"가 홀로 남아 음이름 ɹˌA("레이")로
+    /// 읽힌다. 붙인 "reuse"는 사전에 ɹijˈuz로 있으므로 그걸 쓴다. 사전에 없으면(well-known,
+    /// twenty-five) 손대지 않고 조각별 처리에 맡긴다 — 그쪽은 하이픈의 쉼만 제거되면 정확하다.
+    func joinHyphenatedCompounds(_ tokens: [MToken]) -> [MToken] {
+        guard tokens.count >= 3 else { return tokens }
+        var out: [MToken] = []
+        var i = 0
+        while i < tokens.count {
+            let dash = i + 2 < tokens.count ? tokens[i + 1] : nil
+            if let dash, dash.text == "-",
+                tokens[i].whitespace.isEmpty, dash.whitespace.isEmpty,
+                tokens[i].phonemes == nil, tokens[i + 2].phonemes == nil,
+                tokens[i].meta.alias == nil, tokens[i + 2].meta.alias == nil,
+                !tokens[i].text.isEmpty, tokens[i].text.allSatisfy(\.isLetter),
+                !tokens[i + 2].text.isEmpty, tokens[i + 2].text.allSatisfy(\.isLetter),
+                let joined = lexicon.phonemesForWord(tokens[i].text + tokens[i + 2].text)
+            {
+                let merged = mergeTokens(Array(tokens[i...(i + 2)]))
+                merged.phonemes = joined
+                merged.meta.rating = 4
+                out.append(merged)
+                i += 3
+                continue
+            }
+            out.append(tokens[i])
+            i += 1
+        }
+        return out
+    }
+
     func subtokenize(word: String) -> [String] {
         let nsString = word as NSString
         let range = NSRange(location: 0, length: nsString.length)
@@ -371,7 +403,8 @@ final class EnglishG2P {
     }
 
     // swiftlint:disable:next function_body_length
-    func retokenize(_ tokens: [MToken]) -> [RetokenizedItem] {
+    func retokenize(_ rawTokens: [MToken]) -> [RetokenizedItem] {
+        let tokens = joinHyphenatedCompounds(rawTokens)
         var words: [RetokenizedItem] = []
         var currency: String? = nil
 
@@ -393,6 +426,10 @@ final class EnglishG2P {
             }
             subtokens.last?.whitespace = token.whitespace
 
+            // 이 토큰이 대시일 때, 앞뒤가 공백 없이 붙어 있는가(= 단어를 잇는 하이픈인가).
+            let dashJoinsWords = token.whitespace.isEmpty
+                && i > 0 && tokens[i - 1].whitespace.isEmpty
+
             for j in 0..<subtokens.count {
                 let token = subtokens[j]
 
@@ -405,7 +442,11 @@ final class EnglishG2P {
                 } else if token.tag == .dash
                     || (token.tag == .punctuation && token.text == "–")
                 {
-                    token.phonemes = "—"
+                    // 단어 내부 하이픈(re-use, well-known)은 붙임표지 쉼표가 아니다. `—`를 주면
+                    // Kokoro가 그 자리에서 멈춰 "well [쉼] known"처럼 읽는다. 앞뒤에 공백이 없으면
+                    // 단어를 잇는 하이픈으로 보고 음소를 비우고, 독립된 대시("a - b", "a — b")만
+                    // 쉼으로 남긴다.
+                    token.phonemes = dashJoinsWords ? "" : "—"
                     token.meta.rating = 3
                 } else if let tag = token.tag, EnglishG2P.punctuationTags.contains(tag),
                     !token.text.lowercased().unicodeScalars.allSatisfy({
