@@ -41,31 +41,37 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
     /// 아니다: 같은 int8pal 가중치로 CPU는 PyTorch와 48/48 정확히 일치한다. 게다가 이 스테이지는
     /// 작은 LSTM이라 CPU가 **가장 빠르기까지 하다**(1.9ms vs GPU 9.4ms). 잃는 게 없다.
     /// duration이 틀리면 오디오뿐 아니라 단어 타임스탬프도 함께 틀어지므로 우회 불가.
-    struct StagePlacement {
-        var albert: MLComputeUnits = .cpuAndNeuralEngine
-        var postAlbert: MLComputeUnits = .cpuOnly
-        var alignment: MLComputeUnits = .cpuAndNeuralEngine
-        var prosody: MLComputeUnits = .all
-        var noise: MLComputeUnits = .all
-        var vocoder: MLComputeUnits = .cpuAndNeuralEngine
-        var tail: MLComputeUnits = .all
+    ///
+    /// 기본값은 **Metal을 전혀 쓰지 않는다**(`.all` 없음). 백그라운드에서 GPU 제출이 거부되는 걸
+    /// 피하는 게 이 엔진을 도입한 이유이기 때문이다. 대가는 작다 — prosody/noise/tail을 `.all`에서
+    /// `.cpuAndNeuralEngine`으로 내려도 mel_corr 0.9936 → 0.9934, 체인 63.7ms → 68.0ms(약 6%)다.
+    public struct StagePlacement: Sendable {
+        public var albert: MLComputeUnits = .cpuAndNeuralEngine
+        public var postAlbert: MLComputeUnits = .cpuOnly
+        public var alignment: MLComputeUnits = .cpuAndNeuralEngine
+        public var prosody: MLComputeUnits = .cpuAndNeuralEngine
+        public var noise: MLComputeUnits = .cpuAndNeuralEngine
+        public var vocoder: MLComputeUnits = .cpuAndNeuralEngine
+        public var tail: MLComputeUnits = .cpuAndNeuralEngine
+
+        public init() {}
+
+        /// GPU를 허용해 약간 더 빠른 배치(전경 전용). 백그라운드 재생에는 쓰지 않는다.
+        public static var allowingGPU: StagePlacement {
+            var p = StagePlacement()
+            p.prosody = .all
+            p.noise = .all
+            p.tail = .all
+            return p
+        }
     }
 
     /// 컴파일된 `.mlmodelc` 7개가 들어 있는 디렉터리에서 로드한다.
-    public convenience init(modelDirectory: URL, voicesDirectory: URL, british: Bool = false) throws {
-        try self.init(
-            modelDirectory: modelDirectory,
-            voicesDirectory: voicesDirectory,
-            british: british,
-            placement: StagePlacement()
-        )
-    }
-
-    init(
+    public init(
         modelDirectory: URL,
         voicesDirectory: URL,
-        british: Bool,
-        placement: StagePlacement
+        british: Bool = false,
+        placement: StagePlacement = StagePlacement()
     ) throws {
         func load(_ name: String, _ units: MLComputeUnits) throws -> MLModel {
             let url = modelDirectory.appendingPathComponent("\(name).mlmodelc")
