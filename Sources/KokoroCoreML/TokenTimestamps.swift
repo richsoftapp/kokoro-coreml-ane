@@ -46,10 +46,10 @@ enum TokenTimestampPredictor {
             guard i < predDur.count - 1 else { break }
 
             guard let phonemes = token.phonemes else {
-                // 음소가 없는 토큰. 공백을 물고 있으면 그 공백 프레임만큼 커서를 민다.
+                // 음소가 아예 없는 토큰. 공백을 물고 있으면 그 공백이 **슬롯 하나**를 차지하므로
+                // 딱 하나만 전진한다. (원본 MLX 구현은 여기서 두 칸을 밀어 이후 인덱스가 전부
+                // 어긋났다 — 음소 스트림에는 공백 하나만 들어가기 때문이다.)
                 if !token.whitespace.isEmpty {
-                    i += 1
-                    guard i < predDur.count else { break }
                     left = right + Double(predDur[i])
                     right = left + Double(predDur[i])
                     i += 1
@@ -61,8 +61,10 @@ enum TokenTimestampPredictor {
             // 들고 있는 음소 수보다 `predDur`가 짧을 수 있다(공백 없는 초장문 단어에서 흔하다).
             // 예전엔 여기서 그냥 break 해 타임스탬프가 **하나도** 안 나왔다 — 소리는 나는데 하이라이트만
             // 죽는 상태다. 남은 프레임까지만이라도 배분하고 끝내는 편이 훨씬 낫다.
+            // `j == i`(음소가 빈 문자열인 토큰 — 괄호·콜론·이모지 등)는 **정상**이다.
+            // `predDur[i..<i]`는 빈 구간이라 합이 0이고, 폭 0 타임스탬프가 나온다.
+            // 여기서 break 하면 그 뒤 문장 전체의 하이라이트가 사라진다.
             let j = min(i + phonemes.count, predDur.count - 1)
-            guard j > i else { break }
 
             token.start_ts = left / halfFramesPerSecond
 

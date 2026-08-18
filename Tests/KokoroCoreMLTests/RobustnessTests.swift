@@ -86,6 +86,30 @@ struct RobustnessTests {
         }
     }
 
+    /// 음소가 빈 토큰(괄호·콜론·이모지)에서 타임스탬프가 끊기지 않아야 한다.
+    ///
+    /// 회귀 방지: 이 토큰들은 `phonemes == ""`라 `j == i`가 되는데, 예전엔 그걸 치명적 중단으로
+    /// 처리해 그 뒤 문장 전체의 하이라이트가 사라졌다. 괄호 하나 때문에 14개 중 2개만 나왔다.
+    @Test("빈 음소 토큰이 타임스탬프를 끊지 않는다", .enabled(if: modelDir != nil && voiceDir != nil))
+    func emptyPhonemeTokensDoNotTruncate() throws {
+        let engine = try KokoroSevenStageEngine(
+            modelDirectory: Self.modelDir!, voicesDirectory: Self.voiceDir!
+        )
+        let expectations: [(String, Int)] = [
+            ("The result (see Fig. 3) was clear — very clear indeed.", 10),
+            ("Great job 👍 everyone 🎉 well done.", 5),
+            ("Cost: $100 (~15%) @ 3.5x rate #1 & more.", 6),
+        ]
+        for (text, minWordish) in expectations {
+            let r = try engine.synthesize(text: text, voice: "af_heart", speed: 1.0)
+            // 글자/숫자를 담은 타임스탬프 = 앱이 단어 강조에 실제로 쓰는 것.
+            let wordish = r.timestamps.filter { $0.text.contains { $0.isLetter || $0.isNumber } }
+            print("  \(text) → 타임스탬프 \(r.timestamps.count)개 (단어성 \(wordish.count)개)")
+            #expect(wordish.count >= minWordish,
+                    "\(text): 단어성 타임스탬프 \(wordish.count)개 < 기대 \(minWordish)개 — 중간에 끊겼다")
+        }
+    }
+
     /// 전체 합성. 죽지 않고, 타임스탬프 불변식을 지켜야 한다.
     @Test("합성 견고성", .enabled(if: modelDir != nil && voiceDir != nil))
     func synthesisRobustness() throws {
