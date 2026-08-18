@@ -57,8 +57,12 @@ enum TokenTimestampPredictor {
                 continue
             }
 
-            let j = i + phonemes.count
-            guard j < predDur.count else { break }
+            // `Tokenizer.encode`는 vocab에 없는 문자를 버리고 `maxLength`에서 자른다. 그래서 토큰이
+            // 들고 있는 음소 수보다 `predDur`가 짧을 수 있다(공백 없는 초장문 단어에서 흔하다).
+            // 예전엔 여기서 그냥 break 해 타임스탬프가 **하나도** 안 나왔다 — 소리는 나는데 하이라이트만
+            // 죽는 상태다. 남은 프레임까지만이라도 배분하고 끝내는 편이 훨씬 낫다.
+            let j = min(i + phonemes.count, predDur.count - 1)
+            guard j > i else { break }
 
             token.start_ts = left / halfFramesPerSecond
 
