@@ -23,6 +23,8 @@ struct SevenStageEngineTests {
         let engine = try KokoroSevenStageEngine(
             modelDirectory: Self.modelDir!, voicesDirectory: Self.voiceDir!
         )
+        // Tail은 CoreML/BNNS를 거치지 않아야 한다(iOS 26.6 SME2 크래시 우회). 폴백으로 조용히 물러나면 잡는다.
+        #expect(engine.usesAccelerateTail, "KokoroTailKernel이 아니라 CoreML Tail 폴백으로 떴다")
         let text = "The quick brown fox jumps over the lazy dog."
         let result = try engine.synthesize(text: text, voice: "af_heart", speed: 1.0)
 

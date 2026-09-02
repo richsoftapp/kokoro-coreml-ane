@@ -26,7 +26,23 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
     private let prosody: MLModel
     private let noise: MLModel
     private let vocoder: MLModel
-    private let tail: MLModel
+    private let tail: TailStage
+
+    /// Tail(conv_post + iSTFT) 실행 경로.
+    ///
+    /// 기본은 [[KokoroTailKernel]](Accelerate) — iOS 26.6.x libBNNS의 SME2 conv 워크스페이스 오버플로우로
+    /// A19 기기에서 매번 죽던 CoreML/BNNS 경로를 통째로 우회한다. 가중치 파싱이 실패하는 경우에만
+    /// (모델 파일이 바뀐 경우) 예전 CoreML 모델로 물러난다.
+    private enum TailStage {
+        case kernel(KokoroTailKernel)
+        case coreML(MLModel)
+    }
+
+    /// Tail이 CoreML 대신 Accelerate 커널로 도는지. 앱이 로드 로그에 남길 수 있게 노출한다.
+    public var usesAccelerateTail: Bool {
+        if case .kernel = tail { return true }
+        return false
+    }
 
     private let g2p: EnglishG2P
     private let tokenizer: Tokenizer
@@ -52,6 +68,7 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
         public var prosody: MLComputeUnits = .cpuAndNeuralEngine
         public var noise: MLComputeUnits = .cpuAndNeuralEngine
         public var vocoder: MLComputeUnits = .cpuAndNeuralEngine
+        /// Tail은 기본적으로 CoreML을 거치지 않으므로([[KokoroTailKernel]]) 폴백 경로에만 적용된다.
         public var tail: MLComputeUnits = .cpuAndNeuralEngine
 
         public init() {}
@@ -90,7 +107,12 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
         self.prosody = try load("KokoroProsody", placement.prosody)
         self.noise = try load("KokoroNoise", placement.noise)
         self.vocoder = try load("KokoroVocoder", placement.vocoder)
-        self.tail = try load("KokoroTail", placement.tail)
+        // Tail은 CoreML을 거치지 않는다(TailStage 참조). 커널이 못 뜨면 예전 경로로 물러난다.
+        if let kernel = try? KokoroTailKernel(modelDirectory: modelDirectory) {
+            self.tail = .kernel(kernel)
+        } else {
+            self.tail = .coreML(try load("KokoroTail", placement.tail))
+        }
 
         self.g2p = EnglishG2P(british: british)
         self.tokenizer = try Tokenizer.loadFromBundle()
@@ -257,16 +279,22 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
         ]))
         let xPre = try MLArrays.require(o6, "x_pre")
 
-        // 7. Tail — fp32 conv_post + iSTFT
-        let o7 = try tail.prediction(from: MLDictionaryFeatureProvider(dictionary: [
-            "x_pre": try MLArrays.cast(xPre, to: .float32),
-        ]))
-        let audio = try MLArrays.require(o7, "audio")
+        // 7. Tail — fp32 conv_post + iSTFT. 기본은 Accelerate 커널(x_pre fp16을 직접 받는다).
+        let audio: [Float]
+        switch tail {
+        case .kernel(let kernel):
+            audio = try kernel.run(xPre: xPre)
+        case .coreML(let model):
+            let o7 = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+                "x_pre": try MLArrays.cast(xPre, to: .float32),
+            ]))
+            audio = MLArrayHelpers.extractFloats(from: try MLArrays.require(o7, "audio"))
+        }
 
-        // 모델은 버킷 길이까지 패딩된 오디오를 낸다. duration 합이 실제 길이다.
+        // 오디오 길이는 5(L−1) = duration 합 × 600이어야 한다. 혹시 더 길면 duration 합으로 자른다.
         let valid = min(predDur.reduce(0, +) * Self.hopSize, audio.count)
         return ChainOutput(
-            samples: MLArrayHelpers.extractFloats(from: audio, maxCount: valid),
+            samples: valid == audio.count ? audio : Array(audio.prefix(valid)),
             predDur: predDur
         )
     }
