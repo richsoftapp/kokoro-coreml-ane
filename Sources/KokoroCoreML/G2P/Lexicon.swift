@@ -359,9 +359,20 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         }
         var phoneticString: Any? = golds[word]
         var rating = 4
-        if phoneticString == nil, isNNP != true {
+        // 대문자 고유명사(NNP)는 원래 silver를 건너뛰고 철자로 읽었다("IBM" 같은 두문자 방어). 그런데 표지·
+        // 머리말의 이름("HOWARD MARKS", "MORGAN HOUSEL")도 전부 대문자 NNP라, silver에만 있는 MARKS·HOUSEL이
+        // "M A R K S"로 읽혔다. 4글자 이상이면 silver의 낱말 발음을 쓴다 — 4글자 이상 두문자 중 silver에 낱말로
+        // 있는 건(scuba, laser, radar…) 어차피 낱말로 읽는 것들이다.
+        let allowsSilverForProperNoun = isNNP == true && w.count >= 4
+        if phoneticString == nil, isNNP != true || allowsSilverForProperNoun {
             phoneticString = silvers[word]
             rating = 3
+        }
+        // 사전에 없는 5글자 이상 대문자 NNP("HOWARD")는 철자가 아니라 BART 폴백(낱말 발음)으로 보낸다 —
+        // 5글자 이상 두문자는 대개 낱말처럼 읽고(NASDAQ, UNESCO), 책에선 대문자 이름이 훨씬 흔하다.
+        // 4글자 이하는 기존대로 철자(IBM, HDMI). nil을 돌려주면 getWord → 파이프라인 fallback(BART)으로 간다.
+        if phoneticString == nil, isNNP == true, w.count >= 5, w.allSatisfy(\.isLetter) {
+            return (nil, nil)
         }
 
         if let phonemeDict = phoneticString as? [String: String?] {
