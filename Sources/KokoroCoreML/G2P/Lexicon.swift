@@ -371,7 +371,10 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         // 사전에 없는 5글자 이상 대문자 NNP("HOWARD")는 철자가 아니라 BART 폴백(낱말 발음)으로 보낸다 —
         // 5글자 이상 두문자는 대개 낱말처럼 읽고(NASDAQ, UNESCO), 책에선 대문자 이름이 훨씬 흔하다.
         // 4글자 이하는 기존대로 철자(IBM, HDMI). nil을 돌려주면 getWord → 파이프라인 fallback(BART)으로 간다.
-        if phoneticString == nil, isNNP == true, w.count >= 5, w.allSatisfy(\.isLetter) {
+        // 단 모음(AEIOUY)이 하나도 없으면(MSNBC, LGBTQ, HTTPS, PBKDF) 낱말로 읽을 수 없는 두문자라 철자로 둔다 —
+        // 이름은 모음 없이 5글자 이상일 수 없다(Y만 있는 이름을 위해 Y도 모음으로 친다 — 단 그런 이름은 품사
+        // 태거가 고유명사로 보지 않으면 원래 경로대로 철자로 읽힌다).
+        if phoneticString == nil, isNNP == true, w.count >= 5, w.allSatisfy(\.isLetter), Lexicon.containsVowel(w) {
             return (nil, nil)
         }
 
@@ -393,6 +396,11 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
 
         let applied = Lexicon.applyStress(phoneticString as? String, stress: stress)
         return (applied, rating)
+    }
+
+    /// 낱말로 발음할 수 있는지의 최소 조건 — 모음 글자(Y 포함)가 하나라도 있는지.
+    private static func containsVowel(_ word: String) -> Bool {
+        word.lowercased().contains { "aeiouy".contains($0) }
     }
 
     private func getParentTag(_ tag: NLTag?, token: String?) -> String? {

@@ -27,6 +27,24 @@ struct CapsNameTests {
         #expect(phonemes("HOWARD MARKS") == phonemes("Howard Marks"), "\(phonemes("HOWARD MARKS")) vs \(phonemes("Howard Marks"))")
     }
 
+    /// 철자 읽기 결과에서 강세 기호를 뺀 것 — 글자 이름 음소가 이어진다(M→ɛm, S→ɛs, B→bi, C→si …).
+    private func unstressed(_ ph: String) -> String {
+        ph.replacingOccurrences(of: "ˈ", with: "").replacingOccurrences(of: "ˌ", with: "")
+    }
+
+    @Test("모음 없는 5글자 이상 대문자 두문자는 여전히 철자로 읽는다")
+    func vowelLessAcronymsAreSpelled() {
+        let letterNames: [Character: String] = [
+            "M": "ɛm", "S": "ɛs", "N": "ɛn", "B": "bi", "C": "si", "L": "ɛl", "G": "ʤi", "T": "ti",
+            "Q": "kju", "H": "Aʧ", "P": "pi", "K": "kA", "D": "di", "F": "ɛf",
+        ]
+        for acronym in ["MSNBC", "LGBTQ", "HTTPS", "PBKDF"] {
+            let expected = acronym.map { letterNames[$0]! }.joined()
+            let actual = unstressed(phonemes(acronym))
+            #expect(actual == expected, "\(acronym): \(phonemes(acronym))")
+        }
+    }
+
     @Test("두문자·낱말 대문자는 기존대로")
     func acronymsAndWords() {
         #expect(phonemes("IBM") == "ˌIbˌiˈɛm")
