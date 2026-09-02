@@ -418,6 +418,8 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     }
 
     private func isKnown(_ word: String) -> Bool {
+        // 빈 문자열은 아래 `index(after: startIndex)`가 트랩한다(빈 alias 등으로 들어올 수 있는 값).
+        guard !word.isEmpty else { return false }
         if golds[word] != nil || Lexicon.symbolSet[word] != nil || silvers[word] != nil {
             return true
         }

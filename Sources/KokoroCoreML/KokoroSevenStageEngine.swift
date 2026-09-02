@@ -19,6 +19,13 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
     static let maxTokens = 512
     /// duration 1프레임 = 오디오 600샘플(24 kHz ÷ 40 fps).
     static let hopSize = 600
+    /// 한 체인(청크)이 낼 수 있는 최대 프레임 수. Prosody(`en` [1,640,L])·Vocoder(`asr` [1,512,L])의
+    /// 변환 시 선언한 shape range 상한(L ≤ 2000 = 50초)이다. 이를 넘기면 CoreML이 입력 shape 오류를
+    /// 던져 청크 전체가 실패하므로, `pred_dur` 합이 넘으면 [[clampDurations]]가 비례 축소한다.
+    static let maxFrames = 2000
+    /// 토큰 하나의 duration 상한(프레임). 모델의 duration head는 sigmoid 50개 합이라 speed 1.0에서
+    /// 50, 최저 speed 0.1에서도 500을 넘을 수 없다 — 그 이상은 fp16 오버플로·NaN 같은 수치 이상이다.
+    static let maxFramesPerToken = 800
 
     private let albert: MLModel
     private let postAlbert: MLModel
@@ -49,6 +56,8 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
     private let voiceStore: VoiceStore
 
     public var availableVoices: [String] { voiceStore.availableVoices }
+    /// 테스트용: 그룹 예산 보정을 위해 음소 길이를 재려고 G2P를 노출한다.
+    var g2pForTesting: EnglishG2P { g2p }
 
     /// 스테이지별 컴퓨트 유닛.
     ///
@@ -133,6 +142,8 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
 
     public func synthesize(text: String, voice: String, speed: Float = 1.0) throws -> Result {
         let start = CFAbsoluteTimeGetCurrent()
+        // speed 0·음수·NaN은 PostAlbert 안의 나눗셈을 inf/NaN으로 만들어 duration이 깨진다. 여기서 막는다.
+        let speed = Self.sanitizedSpeed(speed)
         // G2P의 두 번째 반환값(토큰)을 **버리지 않는다** — 기존 `Phonemizer` 프로토콜 경로가
         // `let (phonemes, _) = …`로 흘려보내던 그 값이 단어 타임스탬프의 절반이다.
         let (phonemes, tokens) = g2p.phonemize(text: text)
@@ -141,7 +152,7 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
         var timestamps: [KokoroTokenTimestamp] = []
         var offset: Double = 0
 
-        for group in Self.groupTokens(tokens, budget: Self.maxTokens - 2) {
+        for group in Self.groupTokens(tokens, budget: Self.tokenBudget(forSpeed: speed)) {
             try autoreleasepool {
                 let ids = tokenizer.encode(group.phonemes, maxLength: Self.maxTokens)
                 guard ids.count > 2 else { return }
@@ -167,6 +178,51 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
     }
 
     // MARK: - Chunking
+
+    /// 합성 속도를 유효 범위로 맞춘다. NaN·inf·0 이하는 1.0으로, 그 외는 [0.1, 10]으로 자른다.
+    static func sanitizedSpeed(_ speed: Float) -> Float {
+        guard speed.isFinite, speed > 0 else { return 1.0 }
+        return min(max(speed, 0.1), 10.0)
+    }
+
+    /// 속도에 따른 그룹 토큰 예산. 느린 속도는 토큰당 프레임이 늘어(duration ∝ 1/speed) 510토큰
+    /// 그룹이 [[maxFrames]]를 넘길 수 있다 — 실측 평균 2.2프레임/음소(speed 1.0)·4.4(speed 0.5)라
+    /// 510토큰은 speed 0.5에서 ~2240프레임이다. 넘기면 CoreML은 오류 없이 **2000프레임에서 잘라**
+    /// 그룹 뒷부분 단어가 소리 없이 빠졌다(macOS 26 실측: 0.5배속 965음소 → 정확히 4000프레임).
+    /// 예산을 속도에 비례해 줄여(0.5 → 318토큰 ≈ 1400프레임) 그룹이 상한 안에 들어오게 한다
+    /// (그래도 넘기면 [[clampDurations]]가 잡지만, 그건 그 그룹만 조금 빨라지는 최후 방어다).
+    static func tokenBudget(forSpeed speed: Float) -> Int {
+        let full = maxTokens - 2
+        guard speed < 0.8 else { return full }
+        return max(64, Int(Double(full) * Double(speed) / 0.8))
+    }
+
+    /// PostAlbert의 duration 출력을 `pred_dur`로 바꾼다. `max(1, round(·))`(MLX 백엔드의 "clamped to
+    /// minimum of 1 frame")에 세 가지 방어를 얹는다:
+    ///  · NaN·inf는 1로 — `Int(Float.nan)`은 Swift 런타임 트랩이다(합성마다 죽는 크래시 클래스).
+    ///  · 토큰당 [[maxFramesPerToken]] 상한 — 수치 이상 값이 수십 분짜리 프레임 축을 만들지 않게.
+    ///  · 합이 `maxFrames`를 넘으면 비례 축소(각 토큰 최소 1 유지) — 넘기면 다음 스테이지의 CoreML
+    ///    shape range 검사가 실패해 청크 전체가 throw 된다. 축소는 그 그룹만 조금 빨라질 뿐 소리는 난다.
+    static func clampDurations(_ raw: [Float], maxFrames: Int = maxFrames) -> [Int] {
+        var pred = raw.map { value -> Int in
+            guard value.isFinite else { return 1 }
+            return min(max(1, Int(value.rounded())), maxFramesPerToken)
+        }
+        var total = pred.reduce(0, +)
+        guard total > maxFrames, pred.count <= maxFrames else { return pred }
+        let scale = Double(maxFrames) / Double(total)
+        pred = pred.map { max(1, Int((Double($0) * scale).rounded(.down))) }
+        total = pred.reduce(0, +)
+        // 바닥값 1로 올라간 항들 때문에 아직 넘으면 가장 긴 토큰부터 1프레임씩 깎는다(토큰 수 < maxFrames라 항상 끝난다).
+        while total > maxFrames {
+            var largest = 0
+            for i in pred.indices where pred[i] > pred[largest] { largest = i }
+            guard pred[largest] > 1 else { break }
+            pred[largest] -= 1
+            total -= 1
+        }
+        return pred
+    }
 
     struct TokenGroup {
         let tokens: [MToken]
@@ -235,9 +291,13 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
         let dArr = try MLArrays.require(o2, "d")
         let tEnArr = try MLArrays.require(o2, "t_en")
 
-        // pred_dur = max(1, round(duration)). MLX 백엔드의 "clamped to minimum of 1 frame"과 동일.
+        // pred_dur = max(1, round(duration)) + NaN·상한·프레임 합 방어([[clampDurations]]).
         let durations = MLArrayHelpers.extractFloats(from: durationArr, maxCount: T)
-        let predDur = durations.map { max(1, Int($0.rounded())) }
+        // 출력이 토큰 수보다 짧으면 아래 `pred_dur` 배열 뒤가 초기화되지 않은 채 Alignment로 넘어간다.
+        guard durations.count == T else {
+            throw KokoroError.inferenceFailed("duration count \(durations.count) != token count \(T)")
+        }
+        let predDur = Self.clampDurations(durations)
 
         // 3. Alignment — duration으로 프레임 축 전개
         let o3 = try alignment.prediction(from: MLDictionaryFeatureProvider(dictionary: [
@@ -303,7 +363,17 @@ public final class KokoroSevenStageEngine: @unchecked Sendable {
 // MARK: - MLMultiArray 생성 헬퍼
 
 enum MLArrays {
+    /// 값 개수가 shape 크기와 정확히 같아야 한다. 많으면 MLMultiArray 버퍼 밖으로 쓰고(힙 손상),
+    /// 적으면 뒤가 초기화되지 않은 채 모델로 들어간다. 둘 다 조용히 넘기지 않고 throw 한다.
+    private static func checkCount(_ count: Int, shape: [Int]) throws {
+        let expected = shape.reduce(1, *)
+        guard count == expected, count > 0 else {
+            throw KokoroError.inferenceFailed("MLMultiArray fill: \(count) values for shape \(shape)")
+        }
+    }
+
     static func int32(_ values: [Int32], shape: [Int]) throws -> MLMultiArray {
+        try checkCount(values.count, shape: shape)
         let a = try MLMultiArray(shape: shape.map(NSNumber.init(value:)), dataType: .int32)
         let ptr = a.dataPointer.assumingMemoryBound(to: Int32.self)
         values.withUnsafeBufferPointer { ptr.update(from: $0.baseAddress!, count: values.count) }
@@ -311,6 +381,7 @@ enum MLArrays {
     }
 
     static func float32(_ values: [Float], shape: [Int]) throws -> MLMultiArray {
+        try checkCount(values.count, shape: shape)
         let a = try MLMultiArray(shape: shape.map(NSNumber.init(value:)), dataType: .float32)
         let ptr = a.dataPointer.assumingMemoryBound(to: Float.self)
         values.withUnsafeBufferPointer { ptr.update(from: $0.baseAddress!, count: values.count) }
@@ -318,6 +389,7 @@ enum MLArrays {
     }
 
     static func float16(_ values: [Float], shape: [Int]) throws -> MLMultiArray {
+        try checkCount(values.count, shape: shape)
         let a = try MLMultiArray(shape: shape.map(NSNumber.init(value:)), dataType: .float16)
         let ptr = a.dataPointer.assumingMemoryBound(to: Float16.self)
         for (i, v) in values.enumerated() { ptr[i] = Float16(v) }

@@ -181,9 +181,13 @@ final class EnglishG2P {
         Self.linkRegex.enumerateMatches(in: input, options: [], range: fullRange) { match, _, _ in
             guard let m = match else { return }
 
-            let range = m.range
-            let start = input.index(input.startIndex, offsetBy: range.location)
-            let end = input.index(start, offsetBy: range.length)
+            // NSRange는 UTF-16 오프셋이다. 예전엔 이를 `String.index(_:offsetBy:)`의 **Character** 오프셋으로
+            // 썼는데, 링크 앞에 이모지·결합문자처럼 UTF-16 2단위 이상인 글자가 있으면 오프셋이 글자 수를
+            // 넘어 "String index is out of bounds"로 죽었다(예: "😀😀😀😀😀😀😀😀😀😀 [here](x)"). 정식 변환을
+            // 쓰고, 그래핌 경계에 안 걸리면 그 링크는 그냥 본문으로 둔다.
+            guard let swiftRange = Range(m.range, in: input), swiftRange.lowerBound >= lastEnd else { return }
+            let start = swiftRange.lowerBound
+            let end = swiftRange.upperBound
 
             result += String(input[lastEnd..<start])
             tokens.append(
