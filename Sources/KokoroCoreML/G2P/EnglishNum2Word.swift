@@ -67,9 +67,27 @@ struct EnglishNum2Word {
         return ("\(lText), \(rText)", lNum + rNum)
     }
 
+    /// `NSDecimalNumber.intValue`는 Int 범위를 넘는 값에서 **감싸진 쓰레기**를 돌려준다 — 2^63은 정확히
+    /// `Int.min`이 되고, 그러면 `toCardinal`의 `abs(Int.min)`이 산술 오버플로로 트랩한다
+    /// ("9223372036854775808.5" 한 토큰에 합성 프로세스가 죽었다). Int 범위 안일 때만 값을 돌려준다.
+    private static func exactInt(_ decimal: Decimal) -> Int? {
+        guard decimal.isFinite, decimal.magnitude <= Decimal(Int.max) else { return nil }
+        return NSDecimalNumber(decimal: decimal).intValue
+    }
+
+    /// Int로 못 담는 큰 수는 자리 숫자를 하나씩 읽는다("nine two two three …") — 크래시나 엉뚱한
+    /// 값("four quintillion …")보다 낫다.
+    private func digitsSpelled(_ decimal: Decimal) -> String {
+        "\(decimal)".compactMap { ch -> String? in
+            if let digit = ch.wholeNumberValue, (0...9).contains(digit) { return lowNumWords[20 - digit] }
+            if ch == "." { return pointWord }
+            if ch == "-" { return negWord.trimmingCharacters(in: .whitespaces) }
+            return nil
+        }.joined(separator: " ")
+    }
+
     private func toOrdinal(_ decimalNumber: Decimal) -> String {
-        let number = NSDecimalNumber(decimal: decimalNumber).intValue
-        guard number > 0 else { return "" }
+        guard let number = Self.exactInt(decimalNumber), number > 0 else { return "" }
 
         var outWords = toCardinal(number).components(separatedBy: " ")
         var lastWords = outWords[outWords.count - 1].components(separatedBy: "-")
@@ -90,7 +108,7 @@ struct EnglishNum2Word {
     }
 
     private func toOrdinalNum(_ decimalNumber: Decimal) -> String {
-        let number = NSDecimalNumber(decimal: decimalNumber).intValue
+        guard let number = Self.exactInt(decimalNumber) else { return "" }
         let ordinal = toOrdinal(decimalNumber)
         if ordinal.count >= 2 {
             let suffix = String(ordinal.suffix(2))
@@ -102,6 +120,8 @@ struct EnglishNum2Word {
 
     private func toCardinal(_ number: Int) -> String {
         if number < 0 {
+            // `abs(Int.min)`은 오버플로 트랩 — 부호를 뒤집을 수 없는 유일한 값은 자리로 읽는다.
+            guard number != Int.min else { return negWord + digitsSpelled(Decimal(number).magnitude) }
             return negWord + toCardinal(abs(number))
         }
 
@@ -132,20 +152,12 @@ struct EnglishNum2Word {
             }
         }
 
-        for (value, word) in midNumWords.sorted(by: { $0.0 > $1.0 }) {
-            if number >= value {
-                let quotient = number / value
-                let remainder = number % value
-                let quotientWord = toCardinal(quotient)
-                if remainder == 0 {
-                    return "\(quotientWord) \(word)"
-                } else {
-                    return "\(quotientWord) \(word), \(toCardinal(remainder))"
-                }
-            }
-        }
-
-        for (value, word) in cards.sorted(by: { $0.key > $1.key }) {
+        // 큰 단위(million 이상)를 **먼저** 본다. midNumWords에는 1000(thousand)이 들어 있어서
+        // 이 순서가 뒤집히면 1,000,000이 1000에 먼저 걸려 quotient가 1000이 되고,
+        // toCardinal(1000)="one thousand"가 붙어 "one thousand thousand"가 된다(백만이 사라짐).
+        let scales = cards.map { ($0.key, $0.value) }.sorted { $0.0 > $1.0 }
+            + midNumWords.sorted { $0.0 > $1.0 }
+        for (value, word) in scales {
             if number >= value {
                 let quotient = number / value
                 let remainder = number % value
@@ -162,7 +174,7 @@ struct EnglishNum2Word {
     }
 
     private func toYear(_ yearDecimal: Decimal, suffix: String? = nil, longVal: Bool = true) -> String {
-        let year = NSDecimalNumber(decimal: yearDecimal).intValue
+        guard let year = Self.exactInt(yearDecimal), year != Int.min else { return digitsSpelled(yearDecimal) }
         var val = year
         var finalSuffix = suffix
 
@@ -198,7 +210,7 @@ struct EnglishNum2Word {
     }
 
     private func toDecimal(_ number: Decimal) -> String {
-        let integerPart = NSDecimalNumber(decimal: number).intValue
+        guard let integerPart = Self.exactInt(number) else { return digitsSpelled(number) }
         let fractionalPart = number - Decimal(integerPart)
 
         if fractionalPart == 0 {

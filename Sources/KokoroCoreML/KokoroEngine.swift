@@ -515,7 +515,10 @@ public final class KokoroEngine: @unchecked Sendable {
         let feConfig = MLModelConfiguration()
         feConfig.computeUnits = .cpuOnly
         let beConfig = MLModelConfiguration()
-        beConfig.computeUnits = forceCPU ? .cpuOnly : .all
+        // forceCPU 경로를 .cpuOnly 대신 .cpuAndNeuralEngine으로 — ANE는 GPU가 아니라 백그라운드
+        // command-buffer abort가 없어 "백그라운드 지속" 목적을 유지하면서, .cpuOnly가 float32 CPU로
+        // 통째로 잡던 거대 중간 텐서(대용량 export에서 ~1.7GB → jetsam)를 ANE로 넘겨 메모리를 크게 줄인다.
+        beConfig.computeUnits = forceCPU ? .cpuAndNeuralEngine : .all
 
         // Start backend on a separate thread (GPU shader compilation is the slow part)
         var loadedBE: MLModel?
