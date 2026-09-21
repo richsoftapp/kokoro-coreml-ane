@@ -61,7 +61,12 @@ final class EnglishG2P {
 
     init(british: Bool = false, unk: String = "❓") {
         self.british = british
-        self.tagger = NLTagger(tagSchemes: [.nameTypeOrLexicalClass])
+        // NLTagger는 **토큰 나누기와 구두점 종류**(.openQuote·.dash·.sentenceTerminator…)에만
+        // 쓴다. 낱말 품사는 [[PerceptronTagger]]가 붙인다 — NLTagger의 영어 품사 자산은 기기에
+        // 없을 수 있어(새 기기·OS 업데이트 직후·저장공간 회수 뒤) 그때는 모든 낱말이 .otherWord로
+        // 오고, 그걸 믿으면 관사 "a"가 글자 이름 "에이"로, "$100"이 "dollar one hundred"로 읽힌다.
+        // 구두점 종류는 자산 없이도 토크나이저가 준다(깨끗한 시뮬레이터에서 확인).
+        self.tagger = NLTagger(tagSchemes: [.lexicalClass])
         self.lexicon = Lexicon(british: british)
         self.unk = unk
 
@@ -91,7 +96,7 @@ final class EnglishG2P {
         }
         let futureTo =
             (token.text == "to" || token.text == "To")
-            || (token.text == "TO" && (token.tag == .particle || token.tag == .preposition))
+            || (token.text == "TO" && (token.pos == "TO" || token.pos == "IN"))
         return TokenContext(futureVowel: vowel, futureTo: futureTo)
     }
 
@@ -233,6 +238,85 @@ final class EnglishG2P {
         return (text: result, tokens: tokens, features: features)
     }
 
+    /// 낱말·구두점 토큰에 Penn 품사를 붙인다. 태거는 문장 단위로 학습됐으므로 문장 종결 부호에서
+    /// 끊어 문장마다 태깅한다(NLTK `pos_tag`와 같은 단위). 이 태그가 Python Misaki가 spaCy에서
+    /// 받는 `token.tag_`에 해당한다.
+    private static func assignPartsOfSpeech(_ tokens: [MToken]) {
+        var sentence: [MToken] = []
+        func flush() {
+            guard !sentence.isEmpty else { return }
+            // 하이픈 복합어(natural-sounding, re-use)는 PTB 토큰화처럼 한 토큰으로 태깅한다 — 태거가
+            // 그렇게(!HYPHEN 자질) 학습됐고, 조각마다 따로 태깅하면 "sounding"이 동사가 되는 식으로
+            // 어긋난다. 같은 태그를 세 조각에 모두 준다.
+            let groups = Self.hyphenGroups(sentence)
+            let words = groups.map { $0.map(\.text).joined() }
+            let tags = PerceptronTagger.shared.tag(words)
+            for (group, tag) in zip(groups, tags) {
+                for token in group { token.pos = tag }
+            }
+            Self.fixCapitalizedFunctionWords(groups, words: words)
+            Self.fixLetterA(sentence)
+            sentence.removeAll(keepingCapacity: true)
+        }
+        for token in tokens where token.tag != .whitespace {
+            sentence.append(token)
+            if token.tag == .sentenceTerminator { flush() }
+        }
+        flush()
+    }
+
+    /// 태거가 제자리에서 구분할 수 있는 닫힌 품사(기능어). 표제어 표기에서 되살릴 후보.
+    private static let functionWordTags: Set<String> = [
+        "DT", "IN", "CC", "TO", "PRP", "PRP$", "MD", "WDT", "WP", "WP$", "WRB", "EX", "PDT", "RP",
+    ]
+
+    /// 전부 대문자인 낱말("TIMELESS LESSONS ON WEALTH", "THE END")은 WSJ로 학습된 태거가 죄다
+    /// NNP(고유명사)로 본다. 그러면 Lexicon이 "ON"·"THE" 같은 기능어까지 두문자로 여겨 글자로
+    /// 읽는다("O N"). 대문자 낱말이 있는 문장은 소문자로 한 번 더 태깅해, 그쪽에서 기능어로 판정된
+    /// 낱말만 그 태그를 쓴다 — 내용어(HOWARD, IBM, LESSONS)는 NNP를 유지해 이름·두문자 처리를 그대로
+    /// 받는다.
+    private static func fixCapitalizedFunctionWords(_ groups: [[MToken]], words: [String]) {
+        let capitalized = groups.indices.filter { i in
+            words[i].count >= 2 && words[i].allSatisfy(\.isLetter) && words[i] == words[i].uppercased()
+        }
+        guard !capitalized.isEmpty else { return }
+        let lowered = PerceptronTagger.shared.tag(words.map { $0.lowercased() })
+        for i in capitalized where functionWordTags.contains(lowered[i]) {
+            for token in groups[i] { token.pos = lowered[i] }
+        }
+    }
+
+    /// 공백 없이 하이픈으로 이어진 낱말 조각들을 한 묶음으로. 그 밖의 토큰은 혼자 한 묶음.
+    private static func hyphenGroups(_ sentence: [MToken]) -> [[MToken]] {
+        var groups: [[MToken]] = []
+        var i = 0
+        while i < sentence.count {
+            var group = [sentence[i]]
+            while i + 2 < sentence.count,
+                sentence[i].whitespace.isEmpty, sentence[i + 1].text == "-",
+                sentence[i + 1].whitespace.isEmpty,
+                sentence[i].text.allSatisfy(\.isLetter), sentence[i + 2].text.allSatisfy(\.isLetter)
+            {
+                group.append(sentence[i + 1])
+                group.append(sentence[i + 2])
+                i += 2
+            }
+            groups.append(group)
+            i += 1
+        }
+        return groups
+    }
+
+    /// 낱글자 "A"는 단수 명사·고유명사 바로 뒤에서만 글자(Exhibit A, Plan A, Vitamin A, John A. Smith)이고
+    /// 그 밖에는 관사다. 태거는 표제어 표기("Once Upon A Time")의 대문자 A를 NNP로, 반대로 명사 뒤의
+    /// A를 DT로 보는 일이 잦아 규칙으로 정한다 — 관사를 글자로 읽으면 "에이"가 튀어나와 훨씬 거슬린다.
+    private static func fixLetterA(_ sentence: [MToken]) {
+        for i in sentence.indices where sentence[i].text == "A" {
+            let previous = i > 0 ? sentence[i - 1].pos : nil
+            sentence[i].pos = (previous == "NN" || previous == "NNP") ? "NNP" : "DT"
+        }
+    }
+
     private func tokenize(preprocessedText: PreprocessTuple) -> [MToken] {
         var mutableTokens: [MToken] = []
 
@@ -244,7 +328,7 @@ final class EnglishG2P {
         tagger.enumerateTags(
             in: preprocessedText.text.startIndex..<preprocessedText.text.endIndex,
             unit: .word,
-            scheme: .nameTypeOrLexicalClass,
+            scheme: .lexicalClass,
             options: options
         ) { tag, tokenRange in
             if let tag = tag {
@@ -260,6 +344,8 @@ final class EnglishG2P {
 
             return true
         }
+
+        Self.assignPartsOfSpeech(mutableTokens)
 
         for feature in preprocessedText.features {
             for token in mutableTokens {
@@ -328,6 +414,7 @@ final class EnglishG2P {
             tokenRange: Range<String.Index>(
                 uncheckedBounds: (lower: tokenRangeStart, upper: tokenRangeEnd)),
             tag: tagSource?.tag,
+            pos: tagSource?.pos,
             whitespace: tokens.last?.whitespace ?? "",
             phonemes: phonemes,
             start_ts: tokens.first?.start_ts,
@@ -667,7 +754,7 @@ final class EnglishG2P {
                 tokens[i].meta.alias == nil, tokens[i + 2].meta.alias == nil,
                 !tokens[i].text.isEmpty, tokens[i].text.allSatisfy(\.isLetter),
                 !tokens[i + 2].text.isEmpty, tokens[i + 2].text.allSatisfy(\.isLetter),
-                let joined = lexicon.phonemesForWord(tokens[i].text + tokens[i + 2].text)
+                let joined = lexicon.phonemesForWord(tokens[i].text + tokens[i + 2].text, tag: tokens[i].pos)
             {
                 let merged = mergeTokens(Array(tokens[i...(i + 2)]))
                 merged.phonemes = joined
@@ -730,7 +817,7 @@ final class EnglishG2P {
 
                 if token.meta.alias != nil || token.phonemes != nil {
                     // Already resolved
-                } else if token.tag == .otherWord, Lexicon.currencies[token.text] != nil {
+                } else if Lexicon.currencies[token.text] != nil {
                     currency = token.text
                     token.phonemes = ""
                     token.meta.rating = 4

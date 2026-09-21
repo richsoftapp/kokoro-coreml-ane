@@ -139,7 +139,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         let stress: Double? =
             (word == word.lowercased()
                 ? nil : (word == word.uppercased() ? capStresses.1 : capStresses.0))
-        let res = getWord(word, tag: token.tag, stress: stress, ctx: ctx)
+        let res = getWord(word, tag: token.pos, stress: stress, ctx: ctx)
         if let phoneme = res.phoneme {
             return (
                 Lexicon.applyStress(
@@ -163,18 +163,21 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     // MARK: - Internal (for CamelCase fallback)
 
     /// Look up a single word's phonemes from the gold/silver dictionaries.
-    func phonemesForWord(_ word: String) -> String? {
+    /// 품사별 항목(reuse: DEFAULT/NOUN)은 `tag`가 있으면 그 태그 → 상위 품사 → DEFAULT 순으로 고른다
+    /// ([[lookup(_:tag:stress:ctx:)]]와 같은 규칙). 없으면 DEFAULT.
+    func phonemesForWord(_ word: String, tag: String? = nil) -> String? {
         let lc = word.lowercased()
+        func pick(_ dict: [String: String?]) -> String? {
+            if let tag, let v = dict[tag] as? String { return v }
+            if let parent = Lexicon.parentTag(tag), let v = dict[parent] as? String { return v }
+            return dict["DEFAULT"] as? String
+        }
         if let v = golds[lc] as? String { return v }
         if let v = golds[word] as? String { return v }
-        if let dict = golds[lc] as? [String: String?], let v = dict["DEFAULT"] as? String {
-            return v
-        }
+        if let dict = golds[lc] as? [String: String?], let v = pick(dict) { return v }
         if let v = silvers[lc] as? String { return v }
         if let v = silvers[word] as? String { return v }
-        if let dict = silvers[lc] as? [String: String?], let v = dict["DEFAULT"] as? String {
-            return v
-        }
+        if let dict = silvers[lc] as? [String: String?], let v = pick(dict) { return v }
         return nil
     }
 
@@ -223,7 +226,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     }
 
     private func getWord(
-        _ word: String, tag: NLTag?, stress: Double?, ctx: TokenContext
+        _ word: String, tag: String?, stress: Double?, ctx: TokenContext
     )
         -> (phoneme: String?, rating: Int?)
     {
@@ -235,7 +238,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         if word.count > 1,
             word.replacingOccurrences(of: "'", with: "").allSatisfy({ $0.isLetter }),
             word != word.lowercased(),
-            (!(tag?.isProperNoun ?? false) || word.count > 7),
+            (tag != "NNP" || word.count > 7),
             golds[word] == nil, silvers[word] == nil,
             (word == word.uppercased() || word.dropFirst().lowercased() == word.dropFirst()),
             (golds[wl] != nil || silvers[wl] != nil
@@ -271,11 +274,11 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
 
     // swiftlint:disable:next cyclomatic_complexity
     private func getSpecialCase(
-        _ word: String, tag: NLTag?, stress: Double?, ctx: TokenContext
+        _ word: String, tag: String?, stress: Double?, ctx: TokenContext
     )
         -> (phoneme: String?, rating: Int?)
     {
-        if tag == .punctuation, let target = Lexicon.addSymbols[word] {
+        if let tag, Lexicon.punctuationTags.contains(tag), let target = Lexicon.addSymbols[word] {
             return lookup(target, tag: nil, stress: -0.5, ctx: ctx)
         } else if let sym = Lexicon.symbolSet[word] {
             return lookup(sym, tag: nil, stress: nil, ctx: ctx)
@@ -287,10 +290,12 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
                 return getNNP(word)
             }
         } else if word == "a" || word == "A" {
-            if tag == .determiner { return ("ɐ", 4) }
+            // 관사(DT)면 ɐ, 아니면 글자 이름 ˈA("Exhibit A"). 품사가 없으면 관사로 — 산문에서 홀로
+            // 선 "a"는 거의 언제나 관사고, 글자 이름 "에이"로 읽는 쪽이 훨씬 큰 사고다.
+            if tag == "DT" || tag == nil { return ("ɐ", 4) }
             return ("ˈA", 4)
         } else if ["am", "Am", "AM"].contains(word) {
-            if let t = tag, pennTag(for: t, token: word).hasPrefix("NN") {
+            if let tag, tag.hasPrefix("NN") {
                 return getNNP(word)
             }
 
@@ -299,17 +304,17 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
             }
             return ("ɐm", 4)
         } else if ["an", "An", "AN"].contains(word) {
-            if word == "AN", let t = tag, pennTag(for: t, token: word).hasPrefix("NN") {
+            if word == "AN", let tag, tag.hasPrefix("NN") {
                 return getNNP(word)
             }
             return ("ɐn", 4)
-        } else if word == "I", let tag, isPersonalPronoun(tag: tag, token: word) {
+        } else if word == "I", tag == "PRP" {
             return (String(Lexicon.secondaryStress) + "I", 4)
         } else if ["by", "By", "BY"].contains(word),
-            getParentTag(tag, token: word) == "ADV"
+            Lexicon.parentTag(tag) == "ADV"
         {
             return ("bˈI", 4)
-        } else if ["to", "To"].contains(word) || (word == "TO" && tag == .preposition) {
+        } else if ["to", "To"].contains(word) || (word == "TO" && (tag == "TO" || tag == "IN")) {
             let chosen: String
             if ctx.futureVowel == nil {
                 chosen = (golds["to"] as? String) ?? "to"
@@ -320,20 +325,20 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
             }
             return (chosen, 4)
         } else if ["in", "In"].contains(word)
-            || (word == "IN" && !(tag?.isProperNoun ?? false))
+            || (word == "IN" && tag != "NNP")
         {
             let s =
-                (ctx.futureVowel == nil || tag != .preposition)
+                (ctx.futureVowel == nil || tag != "IN")
                 ? String(Lexicon.primaryStress) : ""
             return (s + "ɪn", 4)
-        } else if ["the", "The"].contains(word) || (word == "THE" && tag == .determiner) {
+        } else if ["the", "The"].contains(word) || (word == "THE" && tag == "DT") {
             return (ctx.futureVowel == true ? "ði" : "ðə", 4)
-        } else if tag == .preposition,
+        } else if tag == "IN",
             word.range(of: "(?i)vs\\.?$", options: .regularExpression) != nil
         {
             return lookup("versus", tag: nil, stress: nil, ctx: ctx)
         } else if ["used", "Used", "USED"].contains(word) {
-            if (tag == .verb || tag == .adjective) && ctx.futureTo {
+            if (tag == "VBD" || tag == "JJ") && ctx.futureTo {
                 if let m = golds["used"] as? [String: String?], let v = m["VBD"] as? String {
                     return (v, 4)
                 }
@@ -347,7 +352,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     }
 
     private func lookup(
-        _ w: String, tag: NLTag?, stress: Double?, ctx: TokenContext?
+        _ w: String, tag: String?, stress: Double?, ctx: TokenContext?
     ) -> (
         phoneme: String?, rating: Int?
     ) {
@@ -355,7 +360,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         var isNNP: Bool? = nil
         if word == word.uppercased(), golds[word] == nil {
             word = word.lowercased()
-            isNNP = tag?.isProperNoun
+            isNNP = tag == "NNP"
         }
         var phoneticString: Any? = golds[word]
         var rating = 4
@@ -378,10 +383,14 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
             return (nil, nil)
         }
 
+        // Python Misaki와 같은 순서: 뒤에 모음 정보가 없고 "None" 항목이 있으면 그것, 아니면 정확한
+        // Penn 태그(DT·VBD·VBP…), 그것도 없으면 상위 품사(VERB·NOUN·ADV·ADJ), 마지막으로 DEFAULT.
         if let phonemeDict = phoneticString as? [String: String?] {
-            var t = getParentTag(tag, token: w)
+            var t = tag
             if let ctx = ctx, ctx.futureVowel == nil, phonemeDict["None"] != nil {
                 t = "None"
+            } else if let current = t, phonemeDict[current] == nil {
+                t = Lexicon.parentTag(current)
             }
             phoneticString = phonemeDict[t ?? "DEFAULT"] ?? phonemeDict["DEFAULT"]
         }
@@ -403,19 +412,19 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         word.lowercased().contains { "aeiouy".contains($0) }
     }
 
-    private func getParentTag(_ tag: NLTag?, token: String?) -> String? {
-        guard let tag = tag else { return "XX" }
-        let pt = pennTag(for: tag, token: token)
-        // Some words have tag-specific pronunciations (e.g. "that" DT vs DEFAULT,
-        // "read" VBD vs VBP). Return the specific Penn tag when known, falling
-        // back to parent categories.
-        if ["DT", "VBD", "VBN", "VBP"].contains(pt) { return pt }
-        if pt.hasPrefix("VB") { return "VERB" }
-        if pt.hasPrefix("NN") { return "NOUN" }
-        if pt.hasPrefix("ADV") || pt.hasPrefix("RB") { return "ADV" }
-        if pt.hasPrefix("ADJ") || pt.hasPrefix("JJ") { return "ADJ" }
-        return "XX"
+    /// Penn 태그의 상위 품사(Python Misaki `get_parent_tag`). 사전 항목이 VERB/NOUN/ADV/ADJ 키로
+    /// 갈라진 낱말(read·lead·live·record…)이 쓴다.
+    static func parentTag(_ tag: String?) -> String? {
+        guard let tag else { return nil }
+        if tag.hasPrefix("VB") { return "VERB" }
+        if tag.hasPrefix("NN") { return "NOUN" }
+        if tag.hasPrefix("ADV") || tag.hasPrefix("RB") { return "ADV" }
+        if tag.hasPrefix("ADJ") || tag.hasPrefix("JJ") { return "ADJ" }
+        return tag
     }
+
+    /// Penn 구두점 태그(spaCy의 ADD·PUNCT 자리).
+    static let punctuationTags: Set<String> = [".", ",", ":", "(", ")", "``", "''", "#", "$", "SYM", "HYPH", "NFP"]
 
     private func isKnown(_ word: String) -> Bool {
         // 빈 문자열은 아래 `index(after: startIndex)`가 트랩한다(빈 alias 등으로 들어올 수 있는 값).
@@ -440,7 +449,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     }
 
     private func stem_s(
-        _ word: String, tag: NLTag?, stress: Double?, ctx: TokenContext?
+        _ word: String, tag: String?, stress: Double?, ctx: TokenContext?
     ) -> (
         phoneme: String?, rating: Int?
     ) {
@@ -489,7 +498,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     }
 
     private func stem_ed(
-        _ word: String, tag: NLTag?, stress: Double?, ctx: TokenContext?
+        _ word: String, tag: String?, stress: Double?, ctx: TokenContext?
     ) -> (
         phoneme: String?, rating: Int?
     ) {
@@ -526,7 +535,7 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
     }
 
     private func stem_ing(
-        _ word: String, tag: NLTag?, stress: Double?, ctx: TokenContext?
+        _ word: String, tag: String?, stress: Double?, ctx: TokenContext?
     ) -> (
         phoneme: String?, rating: Int?
     ) {

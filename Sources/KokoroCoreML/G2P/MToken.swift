@@ -56,7 +56,10 @@ extension Underscore: CustomStringConvertible {
 class MToken {
     var text: String
     var tokenRange: Range<String.Index>
+    /// NLTagger 토큰 종류(공백·구두점 하위 종류). 낱말 품사로는 쓰지 않는다 — [[pos]].
     var tag: NLTag?
+    /// Penn Treebank 품사([[PerceptronTagger]]). Lexicon의 품사 분기는 전부 이걸 본다.
+    var pos: String?
     var whitespace: String
     var phonemes: String?
     var start_ts: Double?
@@ -67,6 +70,7 @@ class MToken {
         text: String,
         tokenRange: Range<String.Index>,
         tag: NLTag? = nil,
+        pos: String? = nil,
         whitespace: String,
         phonemes: String? = nil,
         start_ts: Double? = nil,
@@ -76,6 +80,7 @@ class MToken {
         self.text = text
         self.tokenRange = tokenRange
         self.tag = tag
+        self.pos = pos
         self.whitespace = whitespace
         self.phonemes = phonemes
         self.start_ts = start_ts
@@ -88,6 +93,7 @@ class MToken {
             text: other.text,
             tokenRange: other.tokenRange,
             tag: other.tag,
+            pos: other.pos,
             whitespace: other.whitespace,
             phonemes: other.phonemes,
             start_ts: other.start_ts,
