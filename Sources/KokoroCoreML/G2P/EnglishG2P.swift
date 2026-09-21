@@ -836,6 +836,19 @@ final class EnglishG2P {
     private func fallback(_ word: MToken) -> (phoneme: String?, rating: Int?) {
         let text = word.text
 
+        // 사전에 없는 낱말(대개 고유명사) 뒤 소유격 "'s"는 camelSplitRegex가 아포스트로피를
+        // 그냥 건너뛰어 외톨이 "s"만 남기고, 그 한 글자가 두문자 철자 경로(getNNP)로 빠져
+        // 글자 이름 "에스"로 읽힌다("McGregor's" → "…ˈɛs"). 쪼개기 전에 먼저 어간만 풀어
+        // 정상 발음을 얻고, 그 발음의 마지막 소리에 맞는 /s/·/z/·/ɪz/를 붙인다.
+        if text.count > 2, text.hasSuffix("'s") || text.hasSuffix("’s") {
+            let stemToken = MToken(copying: word)
+            stemToken.text = String(text.dropLast(2))
+            let stemResult = fallback(stemToken)
+            if let stemPhoneme = stemResult.phoneme, let withPossessive = lexicon.pluralizeS(stemPhoneme) {
+                return (withPossessive, stemResult.rating)
+            }
+        }
+
         let parts = splitCamelCase(text)
         if parts.count > 1 {
             let fragments = parts.map { resolvePart($0) }

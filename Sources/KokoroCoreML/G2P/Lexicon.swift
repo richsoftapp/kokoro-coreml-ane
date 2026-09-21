@@ -465,7 +465,9 @@ final class Lexicon {  // swiftlint:disable:this type_body_length
         return (pluralizeS(looked.0), looked.1)
     }
 
-    private func pluralizeS(_ stem: String?) -> String? {
+    /// [[EnglishG2P.fallback(_:)]]도 쓴다 — 사전에 없는 낱말(고유명사 등) 뒤 소유격 's를
+    /// 글자 이름("에스")으로 철자내지 않고 어간의 마지막 소리에 맞는 /s/·/z/·/ɪz/로 잇기 위해.
+    func pluralizeS(_ stem: String?) -> String? {
         guard let stem = stem, !stem.isEmpty else { return nil }
         if let last = stem.last, "ptkfθ".contains(last) { return stem + "s" }
         if let last = stem.last, "szʃʒʧʤ".contains(last) {
